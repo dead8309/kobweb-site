@@ -1,3 +1,5 @@
+import Build_gradle.SiteListingGenerator.convertSlugToTitle
+import Build_gradle.SiteListingGenerator.toRouteParts
 import com.varabyte.kobweb.common.text.camelCaseToKebabCase
 import com.varabyte.kobweb.gradle.application.util.configAsKobwebApplication
 import com.varabyte.kobwebx.gradle.markdown.MarkdownBlock
@@ -76,8 +78,19 @@ kobweb {
             blockquote.set(SilkCalloutBlockquoteHandler(labels = mapOf("QUOTE" to "")))
         }
 
+        val projectDir = project.projectDir.toString()
+        val headText = this@kobweb.app.index.description.get()
+        // baseUrl is only needed for having the full URL in the generated llms.txt otherwise it will have a relative
+        // path like:
+        // [Getting Started](/docs/guides/first-steps/getting-started): Getting Started
+        //
+        // Is there a better way to get the base URL of hosted site ? possibly from environment variables ?
+        // when hosting on vercel it uses something like VERCEL_URL
+        // https://vercel.com/docs/environment-variables/system-environment-variables#VERCEL_URL
+        val baseUrl = "https://kobweb.varabyte.com"
         process.set { entries ->
             SiteListingGenerator.generate(this, entries)
+            LlmsFileGenerator().generate(baseUrl, headText, entries, projectDir)
         }
     }
 }
@@ -109,13 +122,13 @@ object SiteListingGenerator {
 
     private fun MarkdownEntry.toPath() = "/" + filePath.removePrefix(DOCS_PREFIX).removeSuffix(".md")
 
-    private data class RouteParts(
+    data class RouteParts(
         val category: String,
         val subcategory: String,
         val slug: String,
     )
 
-    private fun MarkdownEntry.toRouteParts() = with(this.toPath().split('/').dropWhile { it.isEmpty() }) {
+    fun MarkdownEntry.toRouteParts() = with(this.toPath().split('/').dropWhile { it.isEmpty() }) {
         require(this.size == 2 || this.size == 3) {
             "Expected category, subcategory (optional), and slug; got \"${this.joinToString("/")}\""
         }
@@ -141,7 +154,7 @@ object SiteListingGenerator {
     )
 
     @Suppress("DEPRECATION") // The suggestion to replace `capitalize` with is awful
-    private fun String.convertSlugToTitle() = split('-')
+    fun String.convertSlugToTitle() = split('-')
         .joinToString(" ") { word ->
             if (word in LOWERCASE_TITLE_WORDS) word.lowercase() else word.capitalize()
         }
@@ -253,5 +266,52 @@ object SiteListingGenerator {
                 """.trimIndent()
             )
         })
+    }
+}
+
+class LlmsFileGenerator {
+    fun generate(
+        baseUrl: String,
+        headText: String,
+        entries: List<MarkdownEntry>,
+        projectDir: String
+    ) {
+        val initialArticles = entries.filter { it.filePath.startsWith(DOCS_PREFIX) }
+
+        val llmsTxtContent = buildString {
+            appendLine("# $headText")
+            appendLine()
+            appendLine("## Docs")
+            appendLine()
+            initialArticles.forEach { entry ->
+                val title = entry.frontMatter["title"]?.singleOrNull() ?: entry.toRouteParts().slug.convertSlugToTitle()
+                if (title.isEmpty()) {
+                    return@forEach
+                }
+                val description = entry.frontMatter["description"]?.singleOrNull() ?: title
+                appendLine("- [$title](${baseUrl}${entry.route}): $description")
+            }
+        }
+        File(projectDir, "${LLMS_OUTPUT_PATH}/llms.txt").apply {
+            writeText(llmsTxtContent)
+        }
+
+        val llmsFullTxtContent = buildString {
+            appendLine("# $headText")
+            appendLine()
+            initialArticles.forEach { entry ->
+                val content = File(projectDir, "src/jsMain/resources/markdown/${entry.filePath}").readText()
+                appendLine(content)
+                appendLine()
+            }
+        }
+        File(projectDir, "${LLMS_OUTPUT_PATH}/llms-full.txt").apply {
+            writeText(llmsFullTxtContent)
+        }
+    }
+
+    companion object {
+        private const val DOCS_PREFIX = "docs/"
+        private const val LLMS_OUTPUT_PATH = "src/jsMain/resources/public"
     }
 }
